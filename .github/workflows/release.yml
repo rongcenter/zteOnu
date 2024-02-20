@@ -28,30 +28,5 @@ jobs:
           distribution: goreleaser
           version: latest
           args: release --clean
-      - name: Publish to GitHub Packages
-        uses: actions/github-script@v3
-        with:
-          script: |
-            const { github } = require('@actions/github');
-            const packageName = 'zteOnu';
-            const packageVersion = '0.0.4';
- 
-            const octokit = github.getOctokit(process.env.GITHUB_TOKEN);
- 
-            octokit.rest.packages.createPackageForAuthenticatedUser({
-              package_name: packageName,
-              package_version: { version: packageVersion },
-              package_files: [
-                {
-                  package_file_id: 'file1',
-                  specified_file_name: 'dist/' + packageName + '-' + packageVersion + '.whl'
-                }
-              ]
-            }).then(result => {
-              console.log('Package version published:', result.data.id);
-            }).catch(error => {
-              console.error('Error publishing package:', error);
-              setFailed(error.message);
-            });          
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
