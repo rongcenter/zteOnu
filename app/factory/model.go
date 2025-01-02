@@ -4,6 +4,9 @@ import (
 	"github.com/go-resty/resty/v2"
 )
 
+// mac address 00-07-29-55-35-57
+const magicBytesBase64 = "AAAAAGAIAACTBwAAOggAALoAAACQBwAAxAcAAMoGAACVBAAATggAAM0BAAAnCA=="
+
 var (
 	AesKeyPool = []byte{
 		0x7B, 0x56, 0xB0, 0xF7, 0xDA, 0x0E, 0x68, 0x52, 0xC8, 0x19,
@@ -38,5 +41,5 @@ type Factory struct {
 	ip     string
 	port   int
 	cli    *resty.Client
-	Key    []byte
+	key    []byte
 }

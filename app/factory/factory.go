@@ -1,9 +1,9 @@
 package factory
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
-	"math/rand"
 	"net/url"
 	"strconv"
 	"strings"
@@ -20,11 +20,17 @@ func New(user string, passwd string, ip string, port int) *Factory {
 		passwd: passwd,
 		ip:     ip,
 		port:   port,
-		cli:    resty.New().SetBaseURL(fmt.Sprintf("http://%s:%d", ip, port)),
+		cli: resty.New().SetHeader("User-Agent", "curl/8.8.0-DEV").
+			SetBaseURL(fmt.Sprintf("http://%s:%d", ip, port)),
 	}
 }
 
-func (f *Factory) Reset() error {
+func (f *Factory) reset() error {
+	// active onu web service first, increase the chances of success
+	if _, err := f.cli.R().Get("/"); err != nil {
+		return err
+	}
+
 	resp, err := f.cli.R().SetBody("SendSq.gch").Post("webFac")
 	if err != nil {
 		return err
@@ -36,7 +42,7 @@ func (f *Factory) Reset() error {
 	return errors.New(resp.String())
 }
 
-func (f *Factory) ReqFactoryMode() error {
+func (f *Factory) reqFactoryMode() error {
 	_, err := f.cli.R().SetBody("RequestFactoryMode.gch").Post("webFac")
 	if err != nil {
 		if err.(*url.Error).Err.Error() != "EOF" {
@@ -46,15 +52,11 @@ func (f *Factory) ReqFactoryMode() error {
 	return nil
 }
 
-func (f *Factory) SendSq() (uint8, error) {
-	var (
-		keyPool []byte
-		idx     int
-		version uint8
-	)
+func (f *Factory) sendSq() (uint8, error) {
+	var version uint8
 
-	r := rand.New(rand.NewSource(time.Now().Unix())).Intn(60)
-	resp, err := f.cli.R().SetBody(fmt.Sprintf("SendSq.gch?rand=%d", r)).Post("webFac")
+	r := time.Now().Second()
+	resp, err := f.cli.R().SetBody(fmt.Sprintf("SendSq.gch?rand=%d\r\n", r)).Post("webFac")
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -63,31 +65,24 @@ func (f *Factory) SendSq() (uint8, error) {
 	}
 
 	if strings.Contains(resp.String(), "newrand") {
-		keyPool = AesKeyPoolNew
 		version = 2
-
 		newRand, _ := strconv.Atoi(strings.ReplaceAll(resp.String(), "newrand=", ""))
-		idx = ((0x1000193*r)&0x3F ^ newRand) % 60
+		f.key = getKeyPool(version, r, newRand)
 	} else if len(resp.String()) == 0 {
-		keyPool = AesKeyPool
 		version = 1
+		f.key = getKeyPool(version, r, 0)
 	} else {
 		return 0, errors.New("unknown error")
-	}
-
-	// Get keys
-	pool := keyPool[idx : idx+24]
-	f.Key = make([]byte, len(pool))
-	for i := range pool {
-		f.Key[i] = (pool[i] ^ 0xA5) & 0xFF
 	}
 
 	return version, nil
 }
 
-func (f *Factory) CheckLoginAuth() error {
+func (f *Factory) checkLoginAuth() error {
+	command := fmt.Sprintf("CheckLoginAuth.gch?&version61&user=%s&pass=%s", f.user, f.passwd)
+
 	payload, err := utils.ECBEncrypt(
-		[]byte(fmt.Sprintf("CheckLoginAuth.gch?version50&user=%s&pass=%s", f.user, f.passwd)), f.Key)
+		[]byte(command), f.key)
 	if err != nil {
 		return err
 	}
@@ -98,7 +93,7 @@ func (f *Factory) CheckLoginAuth() error {
 	}
 	switch resp.StatusCode() {
 	case 200:
-		if _, err := utils.ECBDecrypt(resp.Body(), f.Key); err != nil {
+		if _, err := utils.ECBDecrypt(resp.Body(), f.key); err != nil {
 			return err
 		}
 		return nil
@@ -111,8 +106,15 @@ func (f *Factory) CheckLoginAuth() error {
 	}
 }
 
-func (f *Factory) SendInfo() error {
-	payload, err := utils.ECBEncrypt([]byte("SendInfo.gch?info=6|"), f.Key)
+func (f *Factory) sendInfo() error {
+	command := []byte("SendInfo.gch?info=12|")
+	magicBytes, err := base64.StdEncoding.DecodeString(magicBytesBase64)
+	if err != nil {
+		return err
+	}
+	command = append(command, magicBytes...)
+
+	payload, err := utils.ECBEncrypt(command, f.key)
 	if err != nil {
 		return err
 	}
@@ -133,8 +135,10 @@ func (f *Factory) SendInfo() error {
 	}
 }
 
-func (f *Factory) FactoryMode() (user string, pass string, err error) {
-	payload, err := utils.ECBEncrypt([]byte("FactoryMode.gch?mode=2&user=notused"), f.Key)
+func (f *Factory) factoryMode() (user string, pass string, err error) {
+	command := "FactoryMode.gch?mode=2&user=notused"
+
+	payload, err := utils.ECBEncrypt([]byte(command), f.key)
 	if err != nil {
 		return
 	}
@@ -143,7 +147,7 @@ func (f *Factory) FactoryMode() (user string, pass string, err error) {
 		return
 	}
 
-	dec, err := utils.ECBDecrypt(resp.Body(), f.Key)
+	dec, err := utils.ECBDecrypt(resp.Body(), f.key)
 	if err != nil {
 		return
 	}
@@ -160,18 +164,18 @@ func (f *Factory) FactoryMode() (user string, pass string, err error) {
 	return
 }
 
-func (f *Factory) Handle() (tlUser string, tlPass string, err error) {
+func (f *Factory) handle() (tlUser string, tlPass string, err error) {
 	fmt.Println(strings.Repeat("-", 35))
 
 	fmt.Print("step [0] reset factory: ")
-	if err = f.Reset(); err != nil {
+	if err = f.reset(); err != nil {
 		return
 	} else {
 		fmt.Println("ok")
 	}
 
 	fmt.Print("step [1] request factory mode: ")
-	if err = f.ReqFactoryMode(); err != nil {
+	if err = f.reqFactoryMode(); err != nil {
 		return
 	} else {
 		fmt.Println("ok")
@@ -179,7 +183,7 @@ func (f *Factory) Handle() (tlUser string, tlPass string, err error) {
 
 	var ver uint8
 	fmt.Print("step [2] send sq: ")
-	ver, err = f.SendSq()
+	ver, err = f.sendSq()
 	if err != nil {
 		return
 	} else {
@@ -189,21 +193,21 @@ func (f *Factory) Handle() (tlUser string, tlPass string, err error) {
 	fmt.Print("step [3] check login auth: ")
 	switch ver {
 	case 1:
-		if err = f.CheckLoginAuth(); err != nil {
+		if err = f.checkLoginAuth(); err != nil {
 			return
 		}
 	case 2:
-		if err = f.SendInfo(); err != nil {
+		if err = f.sendInfo(); err != nil {
 			return
 		}
-		if err = f.CheckLoginAuth(); err != nil {
+		if err = f.checkLoginAuth(); err != nil {
 			return
 		}
 	}
 	fmt.Println("ok")
 
 	fmt.Print("step [4] enter factory mode: ")
-	tlUser, tlPass, err = f.FactoryMode()
+	tlUser, tlPass, err = f.factoryMode()
 	if err != nil {
 		return
 	} else {
@@ -213,4 +217,38 @@ func (f *Factory) Handle() (tlUser string, tlPass string, err error) {
 	fmt.Println(strings.Repeat("-", 35))
 
 	return
+}
+
+func (f *Factory) Handle() (tlUser string, tlPass string, err error) {
+	count := 0
+	for {
+		tlUser, tlPass, err = f.handle()
+		if err != nil {
+			count++
+			if count > 10 {
+				return
+			}
+			fmt.Println(err, fmt.Sprintf("Attempt retrying..(%d/10)", count))
+			time.Sleep(time.Millisecond * 500)
+			continue
+		}
+		break
+	}
+
+	return
+}
+
+func getKeyPool(version uint8, r int, newR int) []byte {
+	idx := r
+	keyPool := AesKeyPool[idx : idx+24]
+	if version == 2 {
+		idx = ((0x1000193*r)&0x3F ^ newR) % 60
+		keyPool = AesKeyPoolNew[idx : idx+24]
+	}
+	newKeyPool := make([]byte, len(keyPool))
+	for i := range keyPool {
+		newKeyPool[i] = (keyPool[i] ^ 0xA5) & 0xFF
+	}
+
+	return newKeyPool
 }
